@@ -1,0 +1,258 @@
+---
+title: "D&D Character Predictor"
+author: "Varun Tiwari"
+date: "March 2020"
+output: pdf_document
+---
+
+```{r, Global Settings, echo = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+```
+
+```{r, Load the Libraries}
+library(devtools)
+library(dplyr)
+library(caret)
+library(tidyverse)
+library(ggplot2)
+```
+
+# Introduction
+
+In this report, a **D&D character dataset** was used to create a **D&D character predictor** that can be used to predict a character's class from its ability scores.
+
+The **D&D character dataset** consists of approximately 2600 D&D characters obtained from GitHub (https://github.com/oganm/dnddata) with the permission of the repository creator.
+
+The raw data was then filtered, wrangled, visualized, and two models were trained. A final **D&D character predictor** with an **accuracy** of **~50%** was obtained.
+
+## Basic Introduction to Dungeons and Dragons
+
+Dungeons and Dragons is a very popular role-playing game. Each player creates a character that has, among other attributes, a class, a race, and several ability scores. The twelve main classes in D&D are: barbarian, bard, cleric, druid, fighter, monk, paladin, ranger, rogue, sorcerer, wizard, and warlock. The six ability scores are: strength (str), dexterity (dex), constitution (con), intelligence (int), wisdom (wis), and charisma (cha). Ability scores are generally between 1 (very low) and 20 (very high), but there are some exceptions. Ability scores are chosen/assigned when the character is created and can be increased as a character levels up.
+
+A player will usually assign his or her character's ability scores based on the class that they have selected for that character. For example, a fighter's highest ability score is usually strength, while a wizard's highest ability score is usually intelligence. Therefore, it should be possible to predict a character's class by examining its ability scores.
+
+To simplify the dataset, the characters were limited to the main races in D&D, which are: dwarf, elf, halfling, human, dragonborn, gnome, half-elf, half-orc, and tiefling.
+
+# Data Analysis and Model Development
+
+## Create the Dataset
+
+The raw dataset _dnd_chars_singleclass_ was pulled directly from the GitHub repository. The raw dataset was then filtered down into the _character_data_ by selecting the <u>class</u>, <u>race</u>, <u>str</u>, <u>dex</u>, <u>con</u>, <u>int</u>, <u>wis</u>, and <u>cha</u> columns.
+
+##### Character Data
+
+```{r, Load the Dataset}
+devtools::install_github('oganm/dnddata') # connect to the dataset. I obtained permission from the owner to use the dataset for this project
+raw_character_data <- dnddata::dnd_chars_singleclass  # download the data from the dnd_chars_singleclass dataset
+character_data <- raw_character_data %>% # take the raw data and...
+  select(class = justClass, race, str = Str, dex = Dex, con = Con, int = Int, wis = Wis, cha = Cha) # ...select the relevant info
+head(character_data)
+```
+
+Looking at the _character_data_ dataset, we can see that it contains more classes and races than just the main ones listed above. We can also see that characters with classes or races other than the main ones occur less often.
+
+##### Character Classes
+
+```{r, Character Classes}
+character_data_class <- character_data %>%  # take the character data and...
+  group_by(class) %>% # ...group by class and...
+  summarize(n = n())  # ...summarize frequency of each class
+character_data_class[11:29,1:2] # display the data
+```
+
+##### Character Races
+
+```{r, Character Races}
+character_data_race <- character_data %>% # take the character data and...
+  group_by(race) %>%  # ...group by race and...
+  summarize(n = n())  # ...summarize frequency of each race
+head(character_data_race, 19)  # display the data
+```
+
+To facilitate the model, characters with unusual or uncommon races and classes were removed from the data set. Races in D&D can have sub-races, for example, a character can simply be a dwarf, or a hill dwarf, or a mountain dwarf, etc. Because of this, the dataset has been limited to the main races and their respective sub-races, though race is not used as a predictor for the model.
+
+##### Character Data
+
+```{r, Filtered Character Data}
+classes <- c("Barbarian", "Bard", "Cleric", "Druid", "Fighter", "Monk", "Paladin", "Ranger", "Rogue", "Sorcerer", "Warlock", "Wizard")  # define the relevant classes
+races <- c("dwarf|elf|halfling|human|dragonborn|gnome|half-elf|half-orc|tiefling")  # define the relevant races
+character_data <- character_data %>% # take the character data and...
+  filter(class %in% classes) %>%   # ...filter out the relevant classes
+  filter(str_detect(str_to_lower(race), races)) # ...filter out the relevant races
+head(character_data)  # display the data
+```
+
+## Cursory Data Visualizations and Analysis
+
+```{r, Remove Race from Character Data for Visualizations and Analysis}
+character_data_no_race <- character_data %>% # for modeling purposes, race does not match the rest of the predictors, so it is removed
+  select(-race)
+```
+
+Plotting the dataset by class shows that, as expected, different classes tend to favor different ability scores. Barbarians generally have high strength and low intelligence, rogues typically have high dexterity and low strength, and wizards tend to have low strength and high intelligence.
+
+##### Ability Scores by Class
+
+```{r, Ability Scores by Class}
+character_data_no_race %>%  # take the data and...
+  gather(ability_score, score, -class) %>% # ...gather the ability scores (str, dex, etc) by rank (1-6) and...
+  ggplot(aes(ability_score, score, fill = ability_score)) +  # ...plot the ability scores by rank and...
+  geom_boxplot() +  # ...set the plot as a box plot to see relative frequencies and...
+  facet_wrap(~class, scales = "free") # ...make a plot for each class
+```
+
+
+##### Class by Ability Scores
+
+```{r, Class by Ability Scores}
+character_data_no_race %>% # take the data and...
+  gather(ability_score, score, -class) %>% # ...gather the ability scores (str, dex, etc) by rank (1-6) and...
+  ggplot(aes(class, score, fill = class)) +  # plot the classes by rank and...
+  geom_boxplot() +  # ...set the plot as a box plot to see relative frequencies and...
+  facet_wrap(~ability_score, scales = "free") + # ...make a plot for each ability score
+  theme(axis.title.x = element_blank())
+```
+
+## A First Model
+
+The first model tested was the k-nearest neighbors (kNN) method tuned for k.
+
+##### kNN Model
+
+```{r, kNN Model}
+fit_knn <- train(class ~ ., # train a kNN model
+                 method = "knn",
+                 tuneGrid = data.frame(k = seq(1, 50, 1)), 
+                 data = character_data_no_race)
+model_accs <- tibble(model = "Tuned kNN", acc = max(fit_knn$results$Accuracy)) # create a table to display all the calculated accs
+```
+
+The accuracy of the **tuned kNN** model is 0.49.
+
+## A Second Model
+
+The second model tested was a cp-optimized regression tree.
+
+##### Optimized Regression Tree
+
+```{r, Optimized Regression Tree}
+fit_tree <- train(class ~ ., # optimize Cp for the regression tree
+                     method = "rpart",
+                     tuneGrid = data.frame(cp = seq(0, 0.05, len = 25)),
+                     data = character_data_no_race)
+plot(fit_tree$finalModel, margin = 0.1)  # plot the optimized regression tree and...
+text(fit_tree$finalModel, cex = 0.75) # ...add labels
+model_accs <- bind_rows(model_accs,
+                         tibble(model = "Optimized Regression Tree", acc = max(fit_tree$results$Accuracy))) # add calculated acc to acc table
+```
+
+The accuracy of the **optimized regression tree** model is 0.45, which is a loss in accuracy from the previous model. Also, this regression tree is very crowded, almost impossible to read, and has way too many nodes. The excess of nodes seems to stem from the fact that even within a class, the values of the ability scores vary greatly. To accommodate this, the ability score data was ranked.
+
+## Ranking the Ability Scores
+
+A user defined function was created using the rank() function to rank a character's ability scores from highest (6) to lowest (1). The apply() function was used to apply the function to the entire dataset, and the resulting list was compiled back into a data frame for further analysis
+
+##### Ranked Character Data
+
+```{r, Ranking Ability Scores}
+rank_abilities <- function(ability_score){  # user written function to convert absolute ability scores to ranked ability scores with 6 being the highest rank and one being the lowest rank
+  class <- ability_score[1] # define class within the function
+  race <- ability_score[2]  # define race within the function
+  rank <- rank(ability_score[3:8], ties.method = "max") # rank the ability scores from highest to lowest with ties going high
+  str <- rank[[1]]  # define str within the function
+  dex <- rank[[2]]  # define dex within the function
+  con <- rank[[3]]  # define con within the function
+  int <- rank[[4]]  # define int within the function
+  wis <- rank[[5]]  # define wis within the function
+  cha <- rank[[6]]  # define cha within the function
+  result <- list(class = class, race = race, str = str, dex = dex, con = con, int = int, wis = wis, cha = cha)  # display defined variables as output of function as type list
+}
+
+ranked_character_data <- apply(character_data, 1, rank_abilities) # use function to convert raw ability scores to ranked ability scores
+ranked_character_data <- ranked_character_data %>% # convert list to data frame
+  map(as.data.frame) %>% 
+  bind_rows()
+head(ranked_character_data)  # display the data
+```
+
+The ranked data was revisualized and the models were re-run to see if there was any improvement.
+
+```{r, Remove Race for Analysis}
+ranked_character_data_no_race <- ranked_character_data %>% # for modeling purposes, race does not match the rest of the predictors, so it is removed
+  select(-race)
+```
+
+
+## More Data Visualizations
+
+As expected, the visualizations with the ranked ability scores look almost identical to the visualizations with the raw ability scores, aside from the scales.
+
+##### Ranked Ability Scores by Class
+
+```{r, Ranked Ability Scores by Class}
+ranked_character_data_no_race %>%  # take the data and...
+  gather(ability_score, rank, -class) %>% # ...gather the ability scores (str, dex, etc) by rank (1-6) and...
+  ggplot(aes(ability_score, rank, fill = ability_score)) +  # ...plot the ability scores by rank and...
+  geom_boxplot() +  # ...set the plot as a box plot to see relative frequencies and...
+  facet_wrap(~class, scales = "free") # ...make a plot for each class
+```
+
+##### Class by Ranked Ability Scores
+
+```{r, Class by Ranked Ability Scores}
+ranked_character_data_no_race %>% # take the data and...
+  gather(ability_score, rank, -class) %>% # ...gather the ability scores (str, dex, etc) by rank (1-6) and...
+  ggplot(aes(class, rank, fill = class)) +  # plot the classes by rank and...
+  geom_boxplot() +  # ...set the plot as a box plot to see relative frequencies and...
+  facet_wrap(~ability_score, scales = "free") # ...make a plot for each ability score
+```
+
+## A Third Model
+
+The third model tested was the k-nearest neighbors (kNN) method tuned for k with the ranked ability scores.
+
+##### kNN Model
+
+```{r, Ranked kNN Model}
+fit_knn_ranked <- train(class ~ ., # train a kNN model
+                 method = "knn",
+                 tuneGrid = data.frame(k = seq(1, 50, 1)), 
+                 data = ranked_character_data_no_race)
+model_accs <- bind_rows(model_accs,
+                        tibble(model = "Tuned kNN Ranked", acc = max(fit_knn_ranked$results$Accuracy))) # add calculated acc to acc table
+```
+
+The accuracy of the **ranked tuned kNN** model is 0.49.
+
+## A Fourth Model
+
+The fourth and final model tested was a cp-optimized regression tree with the ranked ability score data.
+
+##### Optimized Regression Tree
+
+```{r, Optimized Regression Tree with Ranked Ability Scores}
+fit_tree_ranked <- train(class ~ ., # optimize Cp for the regression tree
+                     method = "rpart",
+                     tuneGrid = data.frame(cp = seq(0, 0.05, len = 25)),
+                     data = ranked_character_data_no_race)
+plot(fit_tree_ranked$finalModel, margin = 0.05)  # plot the optimized regression tree
+text(fit_tree_ranked$finalModel, cex = 0.65)
+model_accs <- bind_rows(model_accs,
+                        tibble(model = "Optimized Regression Tree Ranked", acc = max(fit_tree_ranked$results$Accuracy))) # add calculated acc to acc table
+```
+
+The accuracy of the **Ranked Optimized Regression Tree** model is 0.49.
+
+# Results - The Best Model
+
+Three of the models developed, the **Tuned kNN** model, the **Ranked Tuned kNN** model, and the **Ranked Optimized Regression Tree** have accuracies of ~50%. The easiest model to visualize is the **Ranked Optimized Regression Tree**.
+
+# Conclusions
+
+After visually analyzing and examining the data and testing several models, a model to predict a D&D character's class from its ability scores with an **accuracy** of **0.49** was developed.
+
+One limitation of these models stems from the relatively small size of the dataset. Organized, publicly available data on D&D character stats is difficult to find. A larger dataset, if it could be accessed, would most likely lead to a more accurate model.
+
+That being said, one of my characters is a wood elf ranger named Pylia with the following ability scores: str 11, dex 18, con 12, int 12, wis 14, and cha 12, which ranked is str 1, dex 6, con 4, int 4, wis 5, and cha 4. Following the decision tree for these ability scores, we find that her intelligence rank is less that 5.5 (left at node 1), her wisdom rank is less than 5.5 (right at node 2), her strength rank is less that 4.5 (right at node 3), her charisma rank is less than 5.5 (left at node 4), her wisdom rank is greater than 3.5 (right at node 5), her constitution rank is greater than 3.5 (left at node 6), and her dexterity rank is greater than 3.5 (right at node 6), giving the accurate class of ranger!
